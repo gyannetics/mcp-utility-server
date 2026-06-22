@@ -2,5 +2,4 @@
 *.lock
 __pycache__/
 mcp_debug.log
-
 .venv/

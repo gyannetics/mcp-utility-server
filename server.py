@@ -1,34 +1,66 @@
 """
 Daily Utilities MCP Server
-- Local: stdio (Claude Desktop)
-- Remote: SSE / HTTP (deployable)
+==========================
+
+Core Model Context Protocol (MCP) server exposing everyday utility tools
+for AI clients such as Cursor and Claude Desktop.
+
+Transports
+----------
+- **stdio** (default): Local process communication used by desktop AI apps.
+  Run with ``uv run server.py`` or ``python server.py``.
+- **SSE** (optional): HTTP Server-Sent Events for remote deployment.
+  Run with ``uv run server.py sse`` (requires the ``sse`` extra).
+
+Tools exposed
+-------------
+- ``get_current_datetime`` — formatted local date/time
+- ``add_numbers`` / ``multiply_numbers`` — basic arithmetic
+- ``safe_calculate`` — AST-based math evaluator (no ``eval()``)
+- ``get_motivational_quote`` — internet quotes with provider fallbacks
+- ``get_dad_joke`` — jokes from icanhazdadjoke.com with local fallbacks
+
+Design notes
+------------
+- FastMCP auto-generates JSON schemas from type hints and docstrings.
+- All logging goes to **stderr** so stdout remains clean for stdio MCP.
+- FastAPI/uvicorn are imported lazily so stdio mode works without the
+  ``sse`` optional dependency group installed.
+
+See README.md for Cursor/Claude configuration and client usage.
 """
 
-import datetime
-import random
-import logging
-import sys
 import ast
+import datetime
+import logging
 import operator
+import random
+import sys
 import traceback
 from typing import Any
 
 import httpx
 from mcp.server.fastmcp import FastMCP
 
-# ====================== LOGGING ======================
+# ---------------------------------------------------------------------------
+# Logging — MUST use stderr in stdio transport (stdout is the MCP wire protocol)
+# ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
-    stream=sys.stderr
+    stream=sys.stderr,
 )
 logger = logging.getLogger(__name__)
 
-# ====================== MCP SERVER ======================
+# ---------------------------------------------------------------------------
+# MCP server instance — name appears in client UIs (Cursor, Claude, etc.)
+# ---------------------------------------------------------------------------
 mcp = FastMCP("Daily Utilities 🚀")
 
-# ====================== SAFE CALCULATOR ======================
-ALLOWED_OPERATORS = {
+# ---------------------------------------------------------------------------
+# Safe calculator — whitelist AST node types instead of using eval()
+# ---------------------------------------------------------------------------
+ALLOWED_OPERATORS: dict[type, Any] = {
     ast.Add: operator.add,
     ast.Sub: operator.sub,
     ast.Mult: operator.mul,
@@ -36,13 +68,33 @@ ALLOWED_OPERATORS = {
     ast.Pow: operator.pow,
 }
 
+
 def _safe_eval(node: ast.AST) -> float:
-    """Safely evaluate simple math expressions."""
+    """
+    Recursively evaluate a restricted AST subtree containing only numbers
+    and basic binary/unary arithmetic operators.
+
+    Parameters
+    ----------
+    node:
+        Root AST node produced by ``ast.parse(..., mode="eval")``.
+
+    Returns
+    -------
+    float
+        Numeric result of the expression.
+
+    Raises
+    ------
+    ValueError
+        If the node contains disallowed types, non-numeric constants,
+        unsupported operators, or division by zero.
+    """
     if isinstance(node, ast.Constant):
         if isinstance(node.value, (int, float)):
             return float(node.value)
         raise ValueError("Only numbers allowed")
-    elif isinstance(node, ast.BinOp):
+    if isinstance(node, ast.BinOp):
         left = _safe_eval(node.left)
         right = _safe_eval(node.right)
         op_type = type(node.op)
@@ -51,38 +103,87 @@ def _safe_eval(node: ast.AST) -> float:
                 raise ValueError("Division by zero")
             return ALLOWED_OPERATORS[op_type](left, right)
         raise ValueError(f"Unsupported operator: {op_type}")
-    elif isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
         return -_safe_eval(node.operand)
-    else:
-        raise ValueError(f"Unsupported expression type: {type(node)}")
+    raise ValueError(f"Unsupported expression type: {type(node)}")
 
 
-# ====================== TOOLS ======================
+# ---------------------------------------------------------------------------
+# MCP tools — sync and async handlers discovered automatically by FastMCP
+# ---------------------------------------------------------------------------
 
 @mcp.tool()
 def get_current_datetime() -> str:
-    """Returns the current date and time in a friendly format."""
+    """
+    Return the current local date and time in a human-readable format.
+
+    Returns
+    -------
+    str
+        Example: ``"Sunday, June 21, 2026 — 04:00:50 PM"``.
+    """
     now = datetime.datetime.now()
     return now.strftime("%A, %B %d, %Y — %I:%M:%S %p")
 
 
 @mcp.tool()
 def add_numbers(a: float, b: float) -> float:
-    """Adds two numbers."""
+    """
+    Add two numbers.
+
+    Parameters
+    ----------
+    a:
+        First addend.
+    b:
+        Second addend.
+
+    Returns
+    -------
+    float
+        Sum ``a + b``.
+    """
     return a + b
 
 
 @mcp.tool()
 def multiply_numbers(a: float, b: float) -> float:
-    """Multiplies two numbers."""
+    """
+    Multiply two numbers.
+
+    Parameters
+    ----------
+    a:
+        First factor.
+    b:
+        Second factor.
+
+    Returns
+    -------
+    float
+        Product ``a * b``.
+    """
     return a * b
 
 
 @mcp.tool()
 def safe_calculate(expression: str) -> str:
     """
-    Safely evaluates a basic math expression.
-    Examples: "2 + 2", "(10 * 3) / 2", "2 ** 8"
+    Safely evaluate a basic math expression without calling ``eval()``.
+
+    Supported syntax: ``+``, ``-``, ``*``, ``/``, ``**``, parentheses, and
+    unary minus. Only numeric literals are permitted.
+
+    Parameters
+    ----------
+    expression:
+        Math expression to evaluate, e.g. ``"15 * 7 + 22"`` or ``"(10 * 3) / 2"``.
+
+    Returns
+    -------
+    str
+        Result string like ``"15 * 7 + 22 = 127.0"``, or an error message
+        describing what went wrong.
     """
     try:
         tree = ast.parse(expression, mode="eval")
@@ -92,7 +193,10 @@ def safe_calculate(expression: str) -> str:
         return f"Error: {str(e)}. Try something like '2 + 2' or '(5 * 3) / 2'."
 
 
-FALLBACK_QUOTES = [
+# ---------------------------------------------------------------------------
+# Motivational quotes — multi-provider HTTP fetch with offline fallbacks
+# ---------------------------------------------------------------------------
+FALLBACK_QUOTES: list[str] = [
     "The only way to do great work is to love what you do. — Steve Jobs",
     "Success is not final, failure is not fatal: it is the courage to continue that counts. — Winston Churchill",
     "The future belongs to those who believe in the beauty of their dreams. — Eleanor Roosevelt",
@@ -100,14 +204,34 @@ FALLBACK_QUOTES = [
     "Everything you've ever wanted is sitting on the other side of fear. — Jack Canfield",
 ]
 
-_HTTP_HEADERS = {
+_HTTP_HEADERS: dict[str, str] = {
     "Accept": "application/json",
     "User-Agent": "MCP-Daily-Utilities/1.0",
 }
-_HTTP_TIMEOUT = 15.0
+_HTTP_TIMEOUT: float = 15.0
 
 
 def _format_quote(content: str, author: str | None) -> str:
+    """
+    Normalize API quote payloads into a single display string.
+
+    Parameters
+    ----------
+    content:
+        Quote body text from an external API.
+    author:
+        Optional author name; appended after an em dash when present.
+
+    Returns
+    -------
+    str
+        Formatted quote, e.g. ``"Quote text — Author Name"``.
+
+    Raises
+    ------
+    ValueError
+        If ``content`` is empty after stripping whitespace.
+    """
     content = content.strip()
     if not content:
         raise ValueError("Empty quote content")
@@ -117,7 +241,26 @@ def _format_quote(content: str, author: str | None) -> str:
 
 
 async def _fetch_quote_from_quotable(client: httpx.AsyncClient) -> str:
-    """Fetch a random quote from quotable.io."""
+    """
+    Fetch one random inspirational quote from quotable.io.
+
+    Parameters
+    ----------
+    client:
+        Shared async HTTP client (connection pooling, shared headers).
+
+    Returns
+    -------
+    str
+        Formatted quote string.
+
+    Raises
+    ------
+    httpx.HTTPError
+        On network or HTTP status failures.
+    ValueError
+        If the response body is missing expected fields.
+    """
     response = await client.get(
         "https://api.quotable.io/random",
         params={"tags": "inspirational|motivational|success|wisdom"},
@@ -128,7 +271,26 @@ async def _fetch_quote_from_quotable(client: httpx.AsyncClient) -> str:
 
 
 async def _fetch_quote_from_zenquotes(client: httpx.AsyncClient) -> str:
-    """Fetch a random quote from zenquotes.io."""
+    """
+    Fetch one random quote from zenquotes.io (backup provider).
+
+    Parameters
+    ----------
+    client:
+        Shared async HTTP client.
+
+    Returns
+    -------
+    str
+        Formatted quote string.
+
+    Raises
+    ------
+    httpx.HTTPError
+        On network or HTTP status failures.
+    ValueError
+        If the JSON shape is not a non-empty list of quote objects.
+    """
     response = await client.get("https://zenquotes.io/api/random")
     response.raise_for_status()
     data = response.json()
@@ -140,9 +302,15 @@ async def _fetch_quote_from_zenquotes(client: httpx.AsyncClient) -> str:
 
 async def fetch_motivational_quote() -> str:
     """
-    Fetch a motivational quote from the internet with provider fallbacks.
+    Fetch a motivational quote with ordered provider fallbacks.
 
-    Tries quotable.io first, then zenquotes.io, then local fallbacks.
+    Attempts quotable.io first, then zenquotes.io. If every provider fails,
+    returns a random entry from :data:`FALLBACK_QUOTES`.
+
+    Returns
+    -------
+    str
+        A motivational quote string, always non-empty.
     """
     providers = (
         ("quotable.io", _fetch_quote_from_quotable),
@@ -164,13 +332,31 @@ async def fetch_motivational_quote() -> str:
 
 @mcp.tool()
 async def get_motivational_quote() -> str:
-    """Returns a random motivational quote fetched from the internet."""
+    """
+    Return a random motivational quote fetched from the internet.
+
+    Uses :func:`fetch_motivational_quote` under the hood. Falls back to
+    bundled quotes when external APIs are unreachable.
+
+    Returns
+    -------
+    str
+        Motivational quote, typically including an author attribution.
+    """
     return await fetch_motivational_quote()
 
 
 @mcp.tool()
 async def get_dad_joke() -> str:
-    """Fetches a random dad joke from the internet."""
+    """
+    Fetch a random dad joke from icanhazdadjoke.com.
+
+    Returns
+    -------
+    str
+        Joke text from the API, or a random local fallback joke if the
+        network request fails.
+    """
     url = "https://icanhazdadjoke.com/"
     try:
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, headers=_HTTP_HEADERS) as client:
@@ -181,26 +367,44 @@ async def get_dad_joke() -> str:
             if joke:
                 return joke
     except Exception as e:
-        logger.error(f"Dad joke fetch failed: {e}")
-    
-    # Fallbacks
+        logger.error("Dad joke fetch failed: %s", e)
+
     fallbacks = [
         "Why don't skeletons fight each other? They don't have the guts.",
         "I'm reading a book about anti-gravity. It's impossible to put down!",
         "Why did the scarecrow win an award? Because he was outstanding in his field!",
-        "Why don't eggs tell jokes? They'd crack each other up."
+        "Why don't eggs tell jokes? They'd crack each other up.",
     ]
     return random.choice(fallbacks)
 
 
-# ====================== REMOTE SSE SUPPORT ======================
+# ---------------------------------------------------------------------------
+# Remote SSE deployment (optional — requires ``uv sync --extra sse``)
+# ---------------------------------------------------------------------------
 def create_sse_app():
-    """Create FastAPI app for remote SSE deployment."""
+    """
+    Build a FastAPI application that exposes this MCP server over SSE.
+
+    The MCP SSE app is mounted at ``/`` so clients connect to
+    ``http://<host>:8000/sse``.
+
+    Returns
+    -------
+    fastapi.FastAPI
+        ASGI app suitable for uvicorn.
+
+    Notes
+    -----
+    Imports FastAPI lazily so stdio-only installs do not require the
+    ``sse`` dependency group.
+    """
     from fastapi import FastAPI
     from starlette.middleware.cors import CORSMiddleware
 
     app = FastAPI(title="Daily Utilities MCP Server")
-    
+
+    # Permissive CORS for local development / remote clients.
+    # Tighten ``allow_origins`` before production deployment.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -208,24 +412,32 @@ def create_sse_app():
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    
+
     app.mount("/", mcp.sse_app())
     return app
 
 
-# ====================== ENTRY POINT ======================
-def main():
-    """Local stdio mode (Claude Desktop)."""
+# ---------------------------------------------------------------------------
+# Entry points
+# ---------------------------------------------------------------------------
+def main() -> None:
+    """
+    Start the MCP server in stdio transport mode.
+
+    This is the mode used by Cursor, Claude Desktop, and ``mcp-client.py``.
+    Blocks until the parent process closes the connection.
+    """
     logger.info("=== Daily Utilities MCP Server STARTING (stdio) ===")
     try:
         mcp.run(transport="stdio")
     except Exception as e:
-        logger.error(f"CRITICAL ERROR: {e}")
+        logger.error("CRITICAL ERROR: %s", e)
         logger.error(traceback.format_exc())
 
 
 if __name__ == "__main__":
-    import sys
+    # ``python server.py``       → stdio (local MCP clients)
+    # ``python server.py sse``   → HTTP/SSE on port 8000
     if len(sys.argv) > 1 and sys.argv[1] == "sse":
         import uvicorn
 
