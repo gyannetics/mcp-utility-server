@@ -1,0 +1,12 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.git/
+.gitignore
+*.lock
+mcp_debug.log
+.cursor/
+agent-tools/
+terminals/

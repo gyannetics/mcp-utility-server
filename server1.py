@@ -23,7 +23,8 @@ Feature tiers
 Transports
 ----------
 - **stdio** (default): ``uv run server1.py``
-- **SSE**: ``uv run server1.py sse`` (requires ``sse`` extra)
+- **SSE / Docker**: ``uv run server1.py sse`` (requires ``sse`` extra)
+  Health probe: ``GET /health`` — MCP clients use ``/sse``.
 
 Security
 --------
@@ -382,6 +383,21 @@ def create_sse_app():
     from starlette.middleware.cors import CORSMiddleware
 
     app = FastAPI(title="Daily Utilities Pro")
+
+    @app.get("/health", tags=["ops"])
+    async def health() -> dict[str, str]:
+        """
+        Liveness probe for load balancers, orchestrators, and Docker HEALTHCHECK.
+
+        Returns a small JSON payload so callers can verify the HTTP process is
+        up without opening an MCP session.
+        """
+        return {
+            "status": "healthy",
+            "server": "daily-utilities-pro",
+            "transport": "sse",
+        }
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -390,6 +406,21 @@ def create_sse_app():
     )
     app.mount("/", mcp.sse_app())
     return app
+
+
+def run_sse() -> None:
+    """
+    Start the MCP server in SSE/HTTP mode (default for Docker deployments).
+
+    Host and port are read from ``HOST`` (default ``0.0.0.0``) and ``PORT``
+    (default ``8000``). Health checks should target ``GET /health``.
+    """
+    import uvicorn
+
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", "8000"))
+    logger.info("Starting SSE server on http://%s:%s (health: /health)", host, port)
+    uvicorn.run(create_sse_app(), host=host, port=port)
 
 
 def main() -> None:
@@ -403,10 +434,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # ``python server1.py``       → stdio (local MCP clients)
+    # ``python server1.py sse``   → HTTP/SSE on port 8000 (+ ``GET /health``)
     if len(sys.argv) > 1 and sys.argv[1] == "sse":
-        import uvicorn
-
-        logger.info("Starting SSE server on http://0.0.0.0:8000")
-        uvicorn.run(create_sse_app(), host="0.0.0.0", port=8000)
+        run_sse()
     else:
         main()

@@ -97,14 +97,60 @@ uv run server1.py
 
 The server waits for MCP connections over stdin/stdout.
 
-### SSE (remote)
+### SSE (remote / Docker)
 
 ```bash
-uv run server.py sse
-# Server available at http://localhost:8000
+uv run server1.py sse
+# MCP endpoint:  http://localhost:8000/sse
+# Health check:  http://localhost:8000/health
 ```
 
-Requires the `sse` extra (`uv sync --extra sse`).
+Requires the `sse` extra (`uv sync --extra sse` or `--all-extras`).
+
+## Docker
+
+The container runs **`server1.py` in SSE mode** (the Pro server) with a built-in health check.
+
+### Quick start
+
+```bash
+# Build and run with Docker Compose (loads .env if present)
+docker compose up --build
+
+# Or plain Docker
+docker build -t mcp-utility-server .
+docker run --rm -p 8000:8000 --env-file .env mcp-utility-server
+```
+
+### Endpoints
+
+| URL | Purpose |
+|-----|---------|
+| `http://localhost:8000/health` | Liveness probe (JSON `{"status": "healthy", ...}`) |
+| `http://localhost:8000/sse` | MCP SSE transport for remote clients |
+
+### Connect a client to the container
+
+```bash
+uv run mcp-client.py --sse http://localhost:8000/sse
+```
+
+### Environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HOST` | `0.0.0.0` | Bind address inside the container |
+| `PORT` | `8000` | HTTP port |
+| `OPENAI_API_KEY` | — | Enables the `ask_smart` LangChain tool |
+| `GROQ_API_KEY` | — | Enables `ask_smart` via Groq (preferred if both set) |
+
+### Run the core server instead
+
+To containerize `server.py` instead of `server1.py`, change the `CMD` in the `Dockerfile`:
+
+```dockerfile
+CMD ["python", "server.py", "sse"]
+```
 
 ## Test with the MCP Client
 
@@ -115,8 +161,8 @@ uv run mcp-client.py
 # Test a single tool
 uv run mcp-client.py --tool get_motivational_quote
 
-# Connect to a running SSE server
-uv run server.py sse
+# Connect to a running SSE server (local or Docker)
+uv run server1.py sse
 uv run mcp-client.py --sse http://localhost:8000/sse
 ```
 
@@ -178,10 +224,13 @@ Example prompts:
 ```
 mcp-utility-server/
 ├── server.py           # Core MCP server
-├── server1.py          # Pro server with LangChain agent
+├── server1.py          # Pro server (default for Docker)
 ├── mcp-client.py       # Test client (stdio + SSE)
+├── Dockerfile          # Container image (server1.py SSE mode)
+├── docker-compose.yml  # Local container orchestration
 ├── pyproject.toml      # Dependencies and optional extras
 ├── .env                # API keys (not committed)
+├── .dockerignore
 ├── .gitignore
 └── README.md
 ```
